@@ -1,0 +1,1113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>360° Forklift Steering Simulator</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #0d1b2a; overflow: hidden; }
+    canvas { display: block; touch-action: none; -webkit-tap-highlight-color: transparent; user-select: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function () {
+'use strict';
+// ════════════════════════════════════════════════════════════
+// CANVAS & RESIZE
+// ════════════════════════════════════════════════════════════
+const c = document.getElementById('c');
+const g = c.getContext('2d');
+const DPR = Math.min(window.devicePixelRatio || 1, 2);
+let W = 0, H = 0;
+const L = {}; // layout constants, recomputed on resize
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  c.width  = W * DPR;
+  c.height = H * DPR;
+  c.style.width  = W + 'px';
+  c.style.height = H + 'px';
+  g.scale(DPR, DPR);
+  computeLayout();
+}
+
+function computeLayout() {
+  L.topH   = 48;
+  L.ctrlH  = Math.max(130, Math.min(H * 0.27, 195));
+  L.gameH  = H - L.topH - L.ctrlH;
+
+  // Steering wheel (bottom-left)
+  L.steerR  = Math.min(L.ctrlH * 0.39, 66);
+  L.steerCX = L.steerR + 26;
+  L.steerCY = L.topH + L.gameH + L.ctrlH / 2;
+
+  // Drive buttons (bottom-right) — FWD/BWD stacked, arrow indicators to their left
+  L.btnW  = Math.min(W * 0.16, 110);
+  L.btnH  = Math.min(L.ctrlH * 0.38, 54);
+  L.btnX  = W - L.btnW - 18;
+  const midC = L.topH + L.gameH + L.ctrlH / 2;
+  L.fwdY  = midC - L.btnH - 5;
+  L.bwdY  = midC + 5;
+
+  // Arrow indicators sit to the left of the FWD/BWD buttons
+  const arrSize = Math.min(L.btnH * 0.82, 42);
+  const gap = 8;
+  L.arrSize = arrSize;
+  L.arrowRX = L.btnX - arrSize - gap;         // right arrow (→)
+  L.arrowLX = L.arrowRX - arrSize - gap;      // left arrow (←)
+  L.arrowY  = midC - arrSize / 2;
+
+  // Direction indicator (top-left, inside game area)
+  L.indR  = Math.min(L.gameH * 0.23, 88);
+  L.indCX = L.indR + 12;
+  L.indCY = L.topH + L.indR + 10;
+}
+
+// ════════════════════════════════════════════════════════════
+// TRUCK DIMENSIONS  (world-space units, 1 unit ≈ 1 CSS pixel at zoom=1)
+// ════════════════════════════════════════════════════════════
+// Real proportions: body 1150mm × width 1270mm, forks 1214mm
+// Scale ≈ 0.055 px/mm → body 63×70px, forks 67px
+const TL   = 63;   // truck body length  (fixed-axle end → steerable end)
+const TW   = 70;   // truck body width   (driver side → opposite side)
+const WB   = TL;   // wheel-base
+const FLEN = 67;   // fork prong length
+const FSEP = 19;   // half-gap between fork prongs (350 mm × scale ≈ 700 mm c-to-c)
+const SPD  = 135;  // drive speed (world units / second)
+
+// ════════════════════════════════════════════════════════════
+// GAME STATE
+// ════════════════════════════════════════════════════════════
+const truck = { x: 0, y: 0, a: 0 }; // position & heading (radians)
+const st = {
+  phi:    0,   // steerable-wheel angle relative to truck heading
+  drv:    0,   // −1 / 0 / +1
+  scene:  0,   // active scenario index
+  hitT:   0,   // collision-flash countdown (s)
+  cam:  { x: 0, y: 0, z: 1 },
+  time:   0,
+};
+
+// ════════════════════════════════════════════════════════════
+// SCENARIO BUILDER HELPERS
+// ════════════════════════════════════════════════════════════
+const mkBox = (x, y, w, h) => ({ x, y, w, h });
+
+// ════════════════════════════════════════════════════════════
+// SCENARIO 0 — CONTAINER YARD
+// ════════════════════════════════════════════════════════════
+function buildContainerYard() {
+  const obs = [], bays = [];
+  const CW = 130, CH = 55;   // container dims
+  const BW = 92,  BD = 155;  // bay width / depth (BW must fit truck width TW=70)
+
+  const topY  = -145; // container-row top edge
+  const botY  =  128; // container-row bottom edge
+
+  // X centres for 6 positions
+  const xs = [-330, -195, -60, 75, 210, 345];
+  const topEmpty = new Set([1, 4]);
+  const botEmpty = new Set([0, 3]);
+
+  xs.forEach((cx, i) => {
+    if (!topEmpty.has(i)) {
+      obs.push(mkBox(cx - CW/2, topY - CH, CW, CH));
+    } else {
+      // Bay walls (left, right, back)
+      obs.push(mkBox(cx - BW/2 - 12, topY - BD - 4, 12, BD + 4));
+      obs.push(mkBox(cx + BW/2,       topY - BD - 4, 12, BD + 4));
+      obs.push(mkBox(cx - BW/2 - 12,  topY - BD - 4, BW + 24, 4));
+      bays.push({ x: cx - BW/2, y: topY - BD, w: BW, h: BD });
+    }
+  });
+
+  xs.forEach((cx, i) => {
+    if (!botEmpty.has(i)) {
+      obs.push(mkBox(cx - CW/2, botY, CW, CH));
+    } else {
+      obs.push(mkBox(cx - BW/2 - 12, botY,         12, BD + 4));
+      obs.push(mkBox(cx + BW/2,       botY,         12, BD + 4));
+      obs.push(mkBox(cx - BW/2 - 12,  botY + BD,    BW + 24, 4));
+      bays.push({ x: cx - BW/2, y: botY, w: BW, h: BD });
+    }
+  });
+
+  return {
+    name: 'Container Yard',
+    tab:  '1',
+    obs, bays,
+    path: null,
+    start: { x: -290, y: 0, a: 0 },
+    bounds: { x: -450, y: -340, w: 900, h: 590 },
+    desc: 'Drive into each blue bay and back out',
+    floor: '#2d3748', grid: '#3a4a5c',
+  };
+}
+
+// ════════════════════════════════════════════════════════════
+// SCENARIO 1 — WAREHOUSE
+// ════════════════════════════════════════════════════════════
+function buildWarehouse() {
+  const obs = [], bays = [];
+  const SL = 260, SH = 52;  // shelf length / height
+  const AISLE = 110;         // aisle gap (truck width TW=70, comfortable margin)
+
+  // 4 shelf rows; rows alternate between full-width and shorter
+  // Row y-centres:
+  const rowYs = [-210, -210 + SH + AISLE, -210 + 2*(SH + AISLE), -210 + 3*(SH + AISLE)];
+  const shelfGroups = [[-370, -90, 190], [-370, -90, 190]]; // x starts for odd/even rows
+
+  rowYs.forEach((ry, ri) => {
+    const starts = (ri % 2 === 0) ? [-380, -100, 180] : [-300, -20, 260];
+    starts.forEach(sx => {
+      obs.push(mkBox(sx, ry - SH / 2, SL, SH));
+    });
+  });
+
+  // Aisle markers (floor highlights)
+  for (let i = 0; i < rowYs.length - 1; i++) {
+    const top = rowYs[i] + SH / 2;
+    const bot = rowYs[i + 1] - SH / 2;
+    bays.push({ x: -430, y: top, w: 860, h: bot - top });
+  }
+
+  // Perimeter walls (light guide lines)
+  obs.push(mkBox(-430, -260, 8, 480));   // left wall
+  obs.push(mkBox(422,  -260, 8, 480));   // right wall
+
+  return {
+    name: 'Warehouse',
+    tab:  '2',
+    obs, bays,
+    path: null,
+    start: { x: -350, y: -280, a: 0 },
+    bounds: { x: -460, y: -290, w: 920, h: 510 },
+    desc: 'Navigate through the aisles without hitting shelves',
+    floor: '#1e293b', grid: '#28374a',
+  };
+}
+
+// ════════════════════════════════════════════════════════════
+// SCENARIO 2 — CURVY PATH
+// ════════════════════════════════════════════════════════════
+function buildCurvyPath() {
+  // Waypoints for Catmull-Rom centerline
+  const pts = [
+    [-220,  90],
+    [-120,  90],
+    [ -30,  60],
+    [  60, -10],
+    [ 160, -80],
+    [ 250, -95],
+    [ 340, -50],
+    [ 420,  50],
+    [ 510,  95],
+    [ 610,  80],
+    [ 700,  10],
+    [ 760, -55],
+    [ 800, -85],
+    [ 820, -85],
+  ];
+  return {
+    name: 'Curvy Path',
+    tab:  '3',
+    obs: [], bays: [],
+    path: { pts, width: 110 },
+    start: { x: pts[0][0], y: pts[0][1], a: 0 },
+    bounds: { x: -300, y: -200, w: 1220, h: 400 },
+    desc: 'Keep the forklift inside the green lane',
+    floor: '#1a2535', grid: '#24334a',
+  };
+}
+
+const SCENES = [buildContainerYard(), buildWarehouse(), buildCurvyPath()];
+
+// ════════════════════════════════════════════════════════════
+// CATMULL-ROM PATH UTILITIES
+// ════════════════════════════════════════════════════════════
+function catmullPoint(pts, i, t) {
+  const clamp = n => Math.max(0, Math.min(pts.length - 1, n));
+  const [p0, p1, p2, p3] = [pts[clamp(i-1)], pts[i], pts[clamp(i+1)], pts[clamp(i+2)]];
+  const t2 = t * t, t3 = t2 * t;
+  return [
+    0.5*((2*p1[0]) + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3),
+    0.5*((2*p1[1]) + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3),
+  ];
+}
+
+// Build a dense list of points along the spline
+function buildSpline(pts, steps = 18) {
+  const out = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    for (let s = 0; s < steps; s++) {
+      out.push(catmullPoint(pts, i, s / steps));
+    }
+  }
+  out.push([...pts[pts.length - 1]]);
+  return out;
+}
+
+// Cache spline per scene to avoid recomputing each frame
+const splineCache = new Map();
+function getSpline(scene) {
+  if (!splineCache.has(scene)) splineCache.set(scene, buildSpline(scene.path.pts));
+  return splineCache.get(scene);
+}
+
+// Nearest point on spline to (px, py) — returns distance²
+function nearestSplineDist2(spline, px, py) {
+  let best = Infinity;
+  for (const [sx, sy] of spline) {
+    const d2 = (px - sx) ** 2 + (py - sy) ** 2;
+    if (d2 < best) best = d2;
+  }
+  return best;
+}
+
+// ════════════════════════════════════════════════════════════
+// PHYSICS
+// ════════════════════════════════════════════════════════════
+function physicsTick(dt) {
+  const v = st.drv * SPD;
+  if (v === 0) return;
+
+  // Bicycle model (front-wheel drive/steer):
+  // The steerable wheel drives the truck in the direction it points.
+  // cos(phi) projects that onto the truck heading → forward/backward speed.
+  // sin(phi) creates the turn rate.
+  // At phi=0°: full speed ahead. At phi=90°: pivot only. At phi=180°: full speed backward.
+  const vForward = v * Math.cos(st.phi);
+  const omega    = v * Math.sin(st.phi) / WB;
+
+  truck.x += vForward * Math.cos(truck.a) * dt;
+  truck.y += vForward * Math.sin(truck.a) * dt;
+  truck.a += omega * dt;
+
+  if (st.hitT > 0) st.hitT -= dt;
+}
+
+function truckCorners() {
+  const ca = Math.cos(truck.a), sa = Math.sin(truck.a);
+  const hw = TL / 2, hh = TW / 2;
+  return [[-hw, -hh], [-hw, hh], [hw, hh], [hw, -hh]].map(([lx, ly]) => [
+    truck.x + lx * ca - ly * sa,
+    truck.y + lx * sa + ly * ca,
+  ]);
+}
+
+function checkCollisions(scene) {
+  const corners = truckCorners();
+  for (const obs of scene.obs) {
+    for (const [cx, cy] of corners) {
+      if (cx >= obs.x && cx <= obs.x + obs.w && cy >= obs.y && cy <= obs.y + obs.h) {
+        st.hitT = 0.45;
+        return;
+      }
+    }
+  }
+}
+
+function lerpCam(dt) {
+  const k = 1 - Math.exp(-7 * dt);
+  st.cam.x += (truck.x - st.cam.x) * k;
+  st.cam.y += (truck.y - st.cam.y) * k;
+}
+
+// ════════════════════════════════════════════════════════════
+// INPUT HANDLING
+// ════════════════════════════════════════════════════════════
+let steerPtr  = null; // { id, lastAngle }
+let fwdActive = false;
+let bwdActive = false;
+
+function getXY(e) {
+  return e.changedTouches
+    ? { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY }
+    : { x: e.clientX, y: e.clientY };
+}
+
+function ptInBtn(px, py, isForward) {
+  const y = isForward ? L.fwdY : L.bwdY;
+  return px >= L.btnX && px <= L.btnX + L.btnW && py >= y && py <= y + L.btnH;
+}
+
+function ptInSteer(px, py) {
+  const dx = px - L.steerCX, dy = py - L.steerCY;
+  return Math.hypot(dx, dy) <= L.steerR + 24;
+}
+
+function ptInSceneTabs(px, py) {
+  // Each tab is roughly W/3 wide in the top bar
+  if (py > L.topH) return -1;
+  return Math.floor(px / (W / 3));
+}
+
+c.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const { x, y } = getXY(e);
+
+  // Scenario tabs
+  const tab = ptInSceneTabs(x, y);
+  if (tab >= 0 && tab < SCENES.length) { switchScene(tab); return; }
+
+  // Steering wheel
+  if (ptInSteer(x, y)) {
+    const dx = x - L.steerCX, dy = y - L.steerCY;
+    steerPtr = { id: e.pointerId, lastAngle: Math.atan2(dy, dx) };
+    c.setPointerCapture(e.pointerId);
+    return;
+  }
+
+  // Drive buttons
+  if (ptInBtn(x, y, true))  { fwdActive = true;  st.drv =  1; c.setPointerCapture(e.pointerId); return; }
+  if (ptInBtn(x, y, false)) { bwdActive = true;  st.drv = -1; c.setPointerCapture(e.pointerId); return; }
+});
+
+c.addEventListener('pointermove', e => {
+  e.preventDefault();
+  if (!steerPtr || e.pointerId !== steerPtr.id) return;
+  const { x, y } = getXY(e);
+  const dx = x - L.steerCX, dy = y - L.steerCY;
+  const angle = Math.atan2(dy, dx);
+  let delta = angle - steerPtr.lastAngle;
+  // Unwrap delta to [−π, π]
+  if (delta >  Math.PI) delta -= 2 * Math.PI;
+  if (delta < -Math.PI) delta += 2 * Math.PI;
+  st.phi += delta;
+  steerPtr.lastAngle = angle;
+});
+
+c.addEventListener('pointerup', e => {
+  e.preventDefault();
+  if (steerPtr && e.pointerId === steerPtr.id) steerPtr = null;
+  fwdActive = false;
+  bwdActive = false;
+  st.drv = 0;
+});
+
+c.addEventListener('pointercancel', e => {
+  steerPtr = null;
+  fwdActive = false;
+  bwdActive = false;
+  st.drv = 0;
+});
+
+// Keyboard support
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowUp'   || e.key === 'w') { st.drv =  1; }
+  if (e.key === 'ArrowDown' || e.key === 's') { st.drv = -1; }
+  if (e.key === 'ArrowLeft' || e.key === 'a') { st.phi -= 0.06; }
+  if (e.key === 'ArrowRight'|| e.key === 'd') { st.phi += 0.06; }
+  if (e.key === '1') switchScene(0);
+  if (e.key === '2') switchScene(1);
+  if (e.key === '3') switchScene(2);
+  if (e.key === 'r' || e.key === 'R') resetCurrentScene();
+});
+window.addEventListener('keyup', e => {
+  if (e.key === 'ArrowUp'   || e.key === 'w') { if (st.drv ===  1) st.drv = 0; }
+  if (e.key === 'ArrowDown' || e.key === 's') { if (st.drv === -1) st.drv = 0; }
+});
+
+// ════════════════════════════════════════════════════════════
+// SCENE SWITCHING
+// ════════════════════════════════════════════════════════════
+function switchScene(idx) {
+  st.scene = idx;
+  resetCurrentScene();
+}
+
+function resetCurrentScene() {
+  const sc = SCENES[st.scene];
+  const s  = sc.start;
+  truck.x = s.x;  truck.y = s.y;  truck.a = s.a;
+  st.phi  = 0;
+  st.drv  = 0;
+  st.hitT = 0;
+  // Fit camera zoom to bounds
+  const bw = sc.bounds.w, bh = sc.bounds.h;
+  const zx = W / bw, zy = L.gameH / bh;
+  st.cam.z = Math.min(zx, zy) * 0.88;
+  st.cam.x = s.x;
+  st.cam.y = s.y;
+}
+
+// ════════════════════════════════════════════════════════════
+// DRAWING — WORLD ELEMENTS
+// ════════════════════════════════════════════════════════════
+function drawWorld(scene) {
+  // Floor
+  g.fillStyle = scene.floor;
+  g.fillRect(-9999, -9999, 19998, 19998);
+
+  // Grid
+  const gs = 80;
+  g.strokeStyle = scene.grid;
+  g.lineWidth   = 0.5;
+  const vx = st.cam.x - W / (2 * st.cam.z);
+  const vy = st.cam.y - L.gameH / (2 * st.cam.z);
+  const vx2 = vx + W / st.cam.z + gs;
+  const vy2 = vy + L.gameH / st.cam.z + gs;
+  const x0  = Math.floor(vx / gs) * gs;
+  const y0  = Math.floor(vy / gs) * gs;
+  for (let gx = x0; gx < vx2; gx += gs) {
+    g.beginPath(); g.moveTo(gx, vy - 10); g.lineTo(gx, vy2); g.stroke();
+  }
+  for (let gy = y0; gy < vy2; gy += gs) {
+    g.beginPath(); g.moveTo(vx - 10, gy); g.lineTo(vx2, gy); g.stroke();
+  }
+
+  // Bay / aisle highlights
+  g.fillStyle = 'rgba(56,189,248,0.13)';
+  for (const bay of scene.bays) {
+    g.fillRect(bay.x, bay.y, bay.w, bay.h);
+    // Dashed border
+    g.strokeStyle = 'rgba(56,189,248,0.55)';
+    g.lineWidth   = 1.5;
+    g.setLineDash([6, 5]);
+    g.strokeRect(bay.x, bay.y, bay.w, bay.h);
+    g.setLineDash([]);
+  }
+
+  // Draw path for curvy scenario
+  if (scene.path) drawPath(scene);
+
+  // Obstacles (containers / shelves)
+  for (const obs of scene.obs) {
+    g.fillStyle   = '#4a5568';
+    g.strokeStyle = '#2d3a4a';
+    g.lineWidth   = 1.5;
+    // Slight 3-D effect: top face lighter
+    g.fillStyle = '#4b5f72';
+    roundRect(obs.x, obs.y, obs.w, obs.h, 4, true, true);
+    // Stripe across top
+    g.fillStyle = 'rgba(255,255,255,0.06)';
+    g.fillRect(obs.x + 2, obs.y + 2, obs.w - 4, Math.min(obs.h * 0.3, 12));
+  }
+
+  // Truck
+  drawTruck();
+}
+
+function drawPath(scene) {
+  const spline = getSpline(scene);
+  const half   = scene.path.width / 2;
+
+  // Outer lane (dark asphalt look)
+  g.strokeStyle = '#1e3a2a';
+  g.lineWidth   = scene.path.width + 14;
+  g.lineJoin    = 'round';
+  g.lineCap     = 'round';
+  splineStroke(spline);
+
+  // Inner lane (green tint)
+  g.strokeStyle = 'rgba(52,211,153,0.22)';
+  g.lineWidth   = scene.path.width;
+  splineStroke(spline);
+
+  // Lane edges
+  g.strokeStyle = 'rgba(52,211,153,0.75)';
+  g.lineWidth   = 2;
+  g.setLineDash([14, 8]);
+  splineOffset(spline,  half);
+  splineOffset(spline, -half);
+  g.setLineDash([]);
+
+  // Centre dashes
+  g.strokeStyle = 'rgba(255,255,255,0.18)';
+  g.lineWidth   = 1.5;
+  g.setLineDash([10, 14]);
+  splineStroke(spline);
+  g.setLineDash([]);
+
+  // Start arrow
+  const [sx, sy] = spline[0];
+  const [ex, ey] = spline[3];
+  const ang = Math.atan2(ey - sy, ex - sx);
+  g.save();
+  g.translate(sx, sy);
+  g.rotate(ang);
+  g.fillStyle = 'rgba(52,211,153,0.8)';
+  g.beginPath();
+  g.moveTo(16, 0); g.lineTo(-8, -9); g.lineTo(-8, 9);
+  g.closePath(); g.fill();
+  g.restore();
+
+  // End marker
+  const [lx, ly] = spline[spline.length - 1];
+  g.fillStyle   = 'rgba(251,191,36,0.85)';
+  g.strokeStyle = '#fff';
+  g.lineWidth   = 2;
+  g.beginPath(); g.arc(lx, ly, 14, 0, Math.PI * 2); g.fill(); g.stroke();
+  g.fillStyle = '#1a2535';
+  g.font = 'bold 11px Arial';
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText('END', lx, ly);
+}
+
+function splineStroke(pts) {
+  g.beginPath();
+  g.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]);
+  g.stroke();
+}
+
+function splineOffset(pts, offset) {
+  // Approximate offset by shifting each point perpendicular to local direction
+  g.beginPath();
+  for (let i = 0; i < pts.length; i++) {
+    const prev = pts[Math.max(0, i - 1)];
+    const next = pts[Math.min(pts.length - 1, i + 1)];
+    const dx = next[0] - prev[0], dy = next[1] - prev[1];
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len * offset, ny = dx / len * offset;
+    if (i === 0) g.moveTo(pts[i][0] + nx, pts[i][1] + ny);
+    else         g.lineTo(pts[i][0] + nx, pts[i][1] + ny);
+  }
+  g.stroke();
+}
+
+// ════════════════════════════════════════════════════════════
+// DRAWING — FORKLIFT
+// ════════════════════════════════════════════════════════════
+function drawTruck() {
+  const ca = Math.cos(truck.a), sa = Math.sin(truck.a);
+  const hitting = st.hitT > 0;
+
+  // Transform to truck local space
+  g.save();
+  g.translate(truck.x, truck.y);
+  g.rotate(truck.a);
+
+  // ── Fixed wheels (2, at left end = LOCAL −x) ──
+  const wlx = -TL / 2; // wheel local x
+  for (const wy of [-TW / 3, TW / 3]) {
+    g.save();
+    g.translate(wlx, wy);
+    g.fillStyle   = '#1e293b';
+    g.strokeStyle = '#475569';
+    g.lineWidth   = 1;
+    // Wheel: oriented along truck (no rotation — fixed)
+    g.beginPath();
+    g.ellipse(0, 0, 11, 6, 0, 0, Math.PI * 2);
+    g.fill(); g.stroke();
+    g.restore();
+  }
+
+  // ── Steerable wheel (right end = LOCAL +x, rotated by phi) ──
+  const wsx = TL / 2;
+  g.save();
+  g.translate(wsx, 0);
+  g.rotate(st.phi);
+  g.fillStyle   = '#1e293b';
+  g.strokeStyle = '#94a3b8';
+  g.lineWidth   = 1.5;
+  g.beginPath();
+  g.ellipse(0, 0, 12, 6, 0, 0, Math.PI * 2);
+  g.fill(); g.stroke();
+  // Direction arrow on wheel
+  g.strokeStyle = '#38bdf8';
+  g.lineWidth   = 2;
+  g.beginPath(); g.moveTo(-7, 0); g.lineTo(7, 0);
+  g.moveTo(4, -3); g.lineTo(7, 0); g.lineTo(4, 3);
+  g.stroke();
+  g.restore();
+
+  // ── Truck body ──
+  const bodyClr = hitting ? '#f87171' : '#fcd34d';
+  g.fillStyle   = bodyClr;
+  g.strokeStyle = hitting ? '#dc2626' : '#92400e';
+  g.lineWidth   = 2;
+  roundRect(-TL / 2, -TW / 2, TL, TW, 5, true, true);
+
+  // Body detail: hood / engine area (right side = steerable)
+  g.fillStyle = hitting ? '#fca5a5' : '#fde68a';
+  roundRect(TL / 2 - 20, -TW / 2 + 3, 17, TW - 6, 3, true, false);
+
+  // Body detail: battery / operator area (left side = fixed)
+  g.fillStyle = hitting ? '#ef4444' : '#d97706';
+  roundRect(-TL / 2 + 2, -TW / 2 + 3, 22, TW - 6, 3, true, false);
+
+  // ── Driver — top-down person-on-chair pictogram, black ──
+  drawPersonOnChair(-TL / 10, TW * 0.02, 56, '#000000');
+
+  // ── Forks (extend from right end = LOCAL +x) ──
+  g.strokeStyle = hitting ? '#f87171' : '#94a3b8';
+  g.lineWidth   = 7;
+  g.lineCap     = 'round';
+  for (const fy of [-FSEP, FSEP]) {
+    g.beginPath();
+    g.moveTo(TL / 2, fy);
+    g.lineTo(TL / 2 + FLEN, fy);
+    g.stroke();
+  }
+  g.lineCap = 'butt';
+  // Fork cross-piece at base
+  g.strokeStyle = hitting ? '#fca5a5' : '#64748b';
+  g.lineWidth   = 3;
+  g.beginPath();
+  g.moveTo(TL / 2, -FSEP); g.lineTo(TL / 2, FSEP);
+  g.stroke();
+
+  g.restore(); // end truck transform
+}
+
+// ════════════════════════════════════════════════════════════
+// DRAWING — HUD OVERLAY
+// ════════════════════════════════════════════════════════════
+function drawTopBar() {
+  // Background
+  g.fillStyle = 'rgba(10,20,35,0.92)';
+  g.fillRect(0, 0, W, L.topH);
+  g.strokeStyle = '#1e3a5f';
+  g.lineWidth = 1;
+  g.beginPath(); g.moveTo(0, L.topH); g.lineTo(W, L.topH); g.stroke();
+
+  // Scenario tabs
+  const tabW = Math.min(W / 3, 160);
+  SCENES.forEach((sc, i) => {
+    const tx = i * tabW + tabW / 2;
+    const active = i === st.scene;
+    g.fillStyle = active ? '#1e40af' : 'rgba(30,50,80,0.6)';
+    roundRect(i * tabW + 4, 6, tabW - 8, L.topH - 12, 6, true, false);
+    g.fillStyle   = active ? '#93c5fd' : '#64748b';
+    g.strokeStyle = active ? '#3b82f6' : '#334155';
+    g.lineWidth   = active ? 2 : 1;
+    roundRect(i * tabW + 4, 6, tabW - 8, L.topH - 12, 6, false, true);
+    g.fillStyle = active ? '#fff' : '#94a3b8';
+    g.font = `${active ? 'bold ' : ''}13px Arial`;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(sc.name, tx, L.topH / 2);
+  });
+
+  // Hint text (right side)
+  const hintX = SCENES.length * tabW + 14;
+  if (hintX + 60 < W) {
+    g.fillStyle = '#475569';
+    g.font = '11px Arial';
+    g.textAlign = 'left'; g.textBaseline = 'middle';
+    g.fillText('⟳ drag to steer  |  ▲▼ to drive  |  R to reset', hintX, L.topH / 2);
+  }
+}
+
+function drawControlArea() {
+  const cy = L.topH + L.gameH;
+  // Background
+  g.fillStyle = 'rgba(8,15,26,0.96)';
+  g.fillRect(0, cy, W, L.ctrlH);
+  g.strokeStyle = '#1e3a5f';
+  g.lineWidth = 1;
+  g.beginPath(); g.moveTo(0, cy); g.lineTo(W, cy); g.stroke();
+
+  drawSteeringWheel();
+  drawDriveButtons();
+
+  // Description text (centre)
+  const scene = SCENES[st.scene];
+  const cx = (L.steerCX + L.steerR + L.btnX) / 2;
+  g.fillStyle   = '#94a3b8';
+  g.font        = '12px Arial';
+  g.textAlign   = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(scene.desc, cx, L.steerCY - 2);
+
+  // Path on-track indicator
+  if (scene.path) {
+    const spline = getSpline(scene);
+    const dist = Math.sqrt(nearestSplineDist2(spline, truck.x, truck.y));
+    const onTrack = dist < scene.path.width / 2;
+    g.fillStyle = onTrack ? '#34d399' : '#f87171';
+    g.font = 'bold 11px Arial';
+    g.fillText(onTrack ? '✓ On track' : '✗ Off track', cx, L.steerCY + 16);
+  }
+}
+
+function drawSteeringWheel() {
+  const cx = L.steerCX, cy = L.steerCY, r = L.steerR;
+
+  // Outer ring
+  g.strokeStyle = '#334155';
+  g.lineWidth   = 3;
+  g.fillStyle   = 'rgba(15,28,45,0.9)';
+  g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2);
+  g.fill(); g.stroke();
+
+  // Tick marks (every 30°, like a clock)
+  for (let deg = 0; deg < 360; deg += 30) {
+    const ang = deg * Math.PI / 180;
+    const isMajor = deg % 90 === 0;
+    const len  = isMajor ? 0.2 : 0.12;
+    const x1   = cx + Math.cos(ang) * r * 0.84;
+    const y1   = cy + Math.sin(ang) * r * 0.84;
+    const x2   = cx + Math.cos(ang) * (r - r * len);
+    const y2   = cy + Math.sin(ang) * (r - r * len);
+    g.strokeStyle = isMajor ? '#475569' : '#2d3d55';
+    g.lineWidth   = isMajor ? 2 : 1;
+    g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
+  }
+
+  // Inner ring
+  g.strokeStyle = '#1e3a5f';
+  g.lineWidth   = 1;
+  g.beginPath(); g.arc(cx, cy, r * 0.65, 0, Math.PI * 2); g.stroke();
+
+  // Wheel spokes (static visual)
+  for (let a = 0; a < Math.PI * 2; a += Math.PI * 2 / 3) {
+    g.strokeStyle = '#1e3a5f';
+    g.lineWidth   = 2;
+    g.beginPath();
+    g.moveTo(cx + Math.cos(a) * r * 0.15, cy + Math.sin(a) * r * 0.15);
+    g.lineTo(cx + Math.cos(a) * r * 0.60, cy + Math.sin(a) * r * 0.60);
+    g.stroke();
+  }
+
+  // Dot indicator (shows current φ angle)
+  const dotA  = st.phi;
+  const dotR  = r * 0.72;
+  const dotX  = cx + Math.cos(dotA) * dotR;
+  const dotY  = cy + Math.sin(dotA) * dotR;
+  // Glow
+  const grd = g.createRadialGradient(dotX, dotY, 0, dotX, dotY, 9);
+  grd.addColorStop(0, '#7dd3fc');
+  grd.addColorStop(1, 'rgba(56,189,248,0)');
+  g.fillStyle = grd;
+  g.beginPath(); g.arc(dotX, dotY, 9, 0, Math.PI * 2); g.fill();
+  // Dot
+  g.fillStyle   = '#38bdf8';
+  g.strokeStyle = '#fff';
+  g.lineWidth   = 1.5;
+  g.beginPath(); g.arc(dotX, dotY, 5.5, 0, Math.PI * 2); g.fill(); g.stroke();
+
+  // Centre hub
+  g.fillStyle   = '#1e3a5f';
+  g.strokeStyle = '#334155';
+  g.lineWidth   = 1.5;
+  g.beginPath(); g.arc(cx, cy, r * 0.14, 0, Math.PI * 2); g.fill(); g.stroke();
+
+  // Label
+  g.fillStyle = '#475569';
+  g.font = '10px Arial';
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  g.fillText('STEER', cx, cy + r + 4);
+}
+
+function drawDriveButtons() {
+  // Original FWD / BWD buttons
+  drawBtn(L.btnX, L.fwdY, L.btnW, L.btnH, '▲  FWD', fwdActive, '#166534', '#16a34a', '#4ade80');
+  drawBtn(L.btnX, L.bwdY, L.btnW, L.btnH, '▼  BWD', bwdActive, '#7f1d1d', '#dc2626', '#fca5a5');
+
+  // Direction indicators: right arrow = forward zone, left arrow = backward zone
+  const p = ((st.phi % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  const isFwdZone = p <= Math.PI / 2 || p >= 3 * Math.PI / 2;
+  drawArrowIndicator(L.arrowRX, L.arrowY, L.arrSize, 'right', isFwdZone);
+  drawArrowIndicator(L.arrowLX, L.arrowY, L.arrSize, 'left',  !isFwdZone);
+}
+
+function drawArrowIndicator(x, y, size, dir, isGreen) {
+  const cx = x + size / 2, cy = y + size / 2;
+  // Background pill
+  g.fillStyle   = isGreen ? '#14532d' : '#1f2937';
+  g.strokeStyle = isGreen ? '#4ade80' : '#4b5563';
+  g.lineWidth   = 2;
+  roundRect(x, y, size, size, 8, true, true);
+
+  if (isGreen) {
+    g.save();
+    g.shadowColor = '#4ade80'; g.shadowBlur = 12;
+    g.fillStyle = 'rgba(0,0,0,0)';
+    roundRect(x, y, size, size, 8, true, false);
+    g.restore();
+  }
+
+  // Arrow shape
+  const aw = size * 0.60, ah = size * 0.55;
+  const tailH = ah * 0.42;
+  g.fillStyle = isGreen ? '#86efac' : '#6b7280';
+  g.beginPath();
+  if (dir === 'right') {
+    g.moveTo(cx + aw / 2, cy);
+    g.lineTo(cx,          cy - ah / 2);
+    g.lineTo(cx,          cy - tailH / 2);
+    g.lineTo(cx - aw / 2, cy - tailH / 2);
+    g.lineTo(cx - aw / 2, cy + tailH / 2);
+    g.lineTo(cx,          cy + tailH / 2);
+    g.lineTo(cx,          cy + ah / 2);
+  } else {
+    g.moveTo(cx - aw / 2, cy);
+    g.lineTo(cx,          cy + ah / 2);
+    g.lineTo(cx,          cy + tailH / 2);
+    g.lineTo(cx + aw / 2, cy + tailH / 2);
+    g.lineTo(cx + aw / 2, cy - tailH / 2);
+    g.lineTo(cx,          cy - tailH / 2);
+    g.lineTo(cx,          cy - ah / 2);
+  }
+  g.closePath();
+  g.fill();
+}
+
+function drawBtn(x, y, w, h, label, active, bgDark, bgLight, txtClr) {
+  g.fillStyle   = active ? bgLight : bgDark;
+  g.strokeStyle = active ? txtClr  : bgLight;
+  g.lineWidth   = 2;
+  roundRect(x, y, w, h, 8, true, true);
+  g.fillStyle = active ? '#fff' : txtClr;
+  g.font = `bold ${Math.min(h * 0.38, 16)}px Arial`;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(label, x + w / 2, y + h / 2);
+}
+
+// ════════════════════════════════════════════════════════════
+// DRAWING — DIRECTION INDICATOR (top-left HUD)
+// ════════════════════════════════════════════════════════════
+function drawDirectionIndicator() {
+  const cx = L.indCX, cy = L.indCY, r = L.indR;
+  const phi = st.phi;
+
+  // Clip to circle
+  g.save();
+  g.beginPath(); g.arc(cx, cy, r + 3, 0, Math.PI * 2);
+  g.clip();
+
+  // Background disc
+  g.fillStyle   = 'rgba(8,20,38,0.92)';
+  g.beginPath(); g.arc(cx, cy, r + 3, 0, Math.PI * 2); g.fill();
+
+  // Tick marks
+  for (let deg = 0; deg < 360; deg += 45) {
+    const ang = deg * Math.PI / 180;
+    const isMaj = deg % 90 === 0;
+    const t1 = r * (isMaj ? 0.80 : 0.88), t2 = r * 0.96;
+    g.strokeStyle = isMaj ? '#334155' : '#1e3a5f';
+    g.lineWidth   = isMaj ? 2 : 1;
+    g.beginPath();
+    g.moveTo(cx + Math.cos(ang) * t1, cy + Math.sin(ang) * t1);
+    g.lineTo(cx + Math.cos(ang) * t2, cy + Math.sin(ang) * t2);
+    g.stroke();
+  }
+
+  // Draw mini forklift diagram — fixed size, independent of circle radius
+  drawMiniForklift(cx, cy, 19); // 75% of previous size (25 × 0.75)
+
+  // ── Wheel-direction indicator: small yellow rectangle on the circle rim ──
+  const rectW = 21, rectH = 7;
+  const rimR  = r - rectH / 2 + 2;
+  const a = phi;
+  g.save();
+  g.translate(cx + Math.cos(a) * rimR, cy + Math.sin(a) * rimR);
+  g.rotate(a);
+  g.fillStyle   = '#fde047';
+  g.strokeStyle = '#ca8a04';
+  g.lineWidth   = 1.5;
+  roundRect(-rectW / 2, -rectH / 2, rectW, rectH, 2, true, true);
+  g.restore();
+
+  g.restore(); // end clip
+
+  // Outer ring
+  g.strokeStyle = '#1e3a5f';
+  g.lineWidth   = 2;
+  g.beginPath(); g.arc(cx, cy, r + 3, 0, Math.PI * 2); g.stroke();
+
+  // Label
+  g.fillStyle = '#475569';
+  g.font = '10px Arial';
+  g.textAlign = 'center'; g.textBaseline = 'top';
+  g.fillText('WHEEL', cx, cy + r + 6);
+}
+
+// Mini forklift schematic drawn inside the direction indicator
+function drawMiniForklift(cx, cy, s) {
+  // s = half-length scale; derive all dims from real proportions
+  g.save();
+  g.translate(cx, cy);
+
+  const bw = s * 2.0;                  // body along x  = TL proportion
+  const bh = bw * (TW / TL);           // body along y  = TW proportion  ≈ bw * 1.11
+  const fl = bw * (FLEN / TL);         // fork length   = FLEN proportion ≈ bw * 1.06
+
+  // Body
+  g.fillStyle   = 'rgba(180,180,180,0.85)';
+  g.strokeStyle = 'rgba(120,120,120,0.7)';
+  g.lineWidth   = 1;
+  roundRect(-bw / 2, -bh / 2, bw, bh, 2, true, true);
+
+  // Driver — top-down person pictogram, black
+  // No person drawn in the indicator mini-truck
+
+  // Forks — dark gray
+  g.strokeStyle = 'rgba(90,90,90,0.9)';
+  g.lineWidth   = bw * 0.11;
+  for (const fy of [-s * 0.60, s * 0.60]) {
+    g.beginPath(); g.moveTo(bw / 2, fy); g.lineTo(bw / 2 + fl, fy); g.stroke();
+  }
+
+  // Fixed wheel indicators (left)
+  for (const wy of [-bh * 0.3, bh * 0.3]) {
+    g.fillStyle   = 'rgba(60,60,60,0.85)';
+    g.strokeStyle = 'rgba(110,110,110,0.6)';
+    g.lineWidth   = 0.8;
+    g.beginPath(); g.ellipse(-bw / 2, wy, bh * 0.13, bw * 0.065, 0, 0, Math.PI * 2); g.fill(); g.stroke();
+  }
+
+  // Steerable wheel (right) — yellow to highlight it
+  g.fillStyle   = 'rgba(250,204,21,0.95)';
+  g.strokeStyle = 'rgba(180,130,0,0.9)';
+  g.lineWidth   = 1;
+  g.save();
+  g.translate(bw / 2, 0);
+  g.rotate(st.phi);
+  g.beginPath(); g.ellipse(0, 0, bh * 0.14, bw * 0.065, 0, 0, Math.PI * 2); g.fill(); g.stroke();
+  g.restore();
+
+  g.restore();
+}
+
+// ════════════════════════════════════════════════════════════
+// DRAWING — UTILITY: ROUNDED RECTANGLE
+// ════════════════════════════════════════════════════════════
+function roundRect(x, y, w, h, r, fill, stroke) {
+  r = Math.min(r, w / 2, h / 2);
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.lineTo(x + w - r, y);
+  g.arcTo(x + w, y,     x + w, y + r,     r);
+  g.lineTo(x + w, y + h - r);
+  g.arcTo(x + w, y + h, x + w - r, y + h, r);
+  g.lineTo(x + r, y + h);
+  g.arcTo(x, y + h,     x, y + h - r,     r);
+  g.lineTo(x, y + r);
+  g.arcTo(x, y,         x + r, y,         r);
+  g.closePath();
+  if (fill)   g.fill();
+  if (stroke) g.stroke();
+}
+
+// Top-down person-on-chair pictogram, faithfully ported from SVG (512×512 viewBox).
+// Person faces -y (upward). cx,cy = centre of person body circle.
+// size = desired rendering size in px (maps the 512-unit SVG space).
+function drawPersonOnChair(cx, cy, size, color) {
+  const sc = size / 512;
+
+  // Use an offscreen canvas so we can punch the gap mask without
+  // affecting anything already drawn on the main canvas.
+  const dim = Math.ceil(size) + 4;
+  const oc  = document.createElement('canvas');
+  oc.width  = dim;
+  oc.height = dim;
+  const og  = oc.getContext('2d');
+
+  // Offset so person body centre (SVG 256,253) → offscreen canvas centre
+  const ox = dim / 2 - 256 * sc;
+  const oy = dim / 2 - 253 * sc;
+  og.translate(ox, oy);
+  og.scale(sc, sc);
+
+  og.strokeStyle = color;
+  og.fillStyle   = color;
+  og.lineCap     = 'round';
+  og.lineJoin    = 'round';
+
+  // ── Chair left arm ──
+  og.lineWidth = 58;
+  og.beginPath();
+  og.moveTo(146, 55); og.lineTo(105, 226);
+  og.quadraticCurveTo(99, 253, 119, 273);
+  og.lineTo(194, 338);
+  og.stroke();
+
+  // ── Chair right arm ──
+  og.beginPath();
+  og.moveTo(366, 55); og.lineTo(407, 226);
+  og.quadraticCurveTo(413, 253, 393, 273);
+  og.lineTo(318, 338);
+  og.stroke();
+
+  // ── Chair seat back ──
+  og.lineWidth = 54;
+  og.beginPath();
+  og.moveTo(157, 332); og.quadraticCurveTo(256, 410, 355, 332);
+  og.stroke();
+
+  // ── Chair footrest ──
+  og.lineWidth = 32;
+  og.beginPath();
+  og.moveTo(105, 401); og.quadraticCurveTo(256, 465, 407, 401);
+  og.stroke();
+
+  // ── Punch gap: erase the area where the person body sits ──
+  og.globalCompositeOperation = 'destination-out';
+  og.fillStyle = 'black';
+  og.beginPath(); og.arc(256, 253, 116, 0, Math.PI * 2); og.fill();
+
+  // ── Person body (filled circle, drawn after gap) ──
+  og.globalCompositeOperation = 'source-over';
+  og.fillStyle = color;
+  og.beginPath(); og.arc(256, 253, 88, 0, Math.PI * 2); og.fill();
+
+  // Stamp offscreen canvas onto main canvas, centred at (cx, cy)
+  g.drawImage(oc, cx - dim / 2, cy - dim / 2);
+}
+// ════════════════════════════════════════════════════════════
+function draw() {
+  g.clearRect(0, 0, W, H);
+
+  // Set up camera transform for game world
+  const { x: cx, y: cy, z } = st.cam;
+  const gx = W / 2 - cx * z;
+  const gy = L.topH + L.gameH / 2 - cy * z;
+
+  // Clip to game area
+  g.save();
+  g.rect(0, L.topH, W, L.gameH);
+  g.clip();
+  g.save();
+  g.translate(gx, gy);
+  g.scale(z, z);
+  drawWorld(SCENES[st.scene]);
+  g.restore();
+  g.restore();
+
+  // UI overlays (screen space)
+  drawTopBar();
+  drawControlArea();
+  drawDirectionIndicator();
+}
+
+// ════════════════════════════════════════════════════════════
+// GAME LOOP
+// ════════════════════════════════════════════════════════════
+let lastTime = null;
+
+function loop(ts) {
+  requestAnimationFrame(loop);
+  if (!lastTime) { lastTime = ts; return; }
+  const dt = Math.min((ts - lastTime) / 1000, 0.05); // clamp to 50ms
+  lastTime = ts;
+  st.time += dt;
+
+  physicsTick(dt);
+  checkCollisions(SCENES[st.scene]);
+  lerpCam(dt);
+  draw();
+}
+
+// ════════════════════════════════════════════════════════════
+// INIT
+// ════════════════════════════════════════════════════════════
+window.addEventListener('resize', () => {
+  resize();
+  // Re-scale after resize without losing DPR transform
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+});
+
+resize();
+switchScene(0);
+requestAnimationFrame(loop);
+
+  })();
+</script>
+</body>
+</html>
