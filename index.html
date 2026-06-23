@@ -705,23 +705,29 @@ function drawControlArea() {
   drawSteeringWheel();
   drawDriveButtons();
 
-  // Description text (centre)
+  // Description text — drawn as overlay at bottom of game area, never overlaps controls
   const scene = SCENES[st.scene];
-  const cx = (L.steerCX + L.steerR + L.btnX) / 2;
-  g.fillStyle   = '#94a3b8';
-  g.font        = '12px Arial';
-  g.textAlign   = 'center';
+  const cx = W / 2;
+  const textY = L.topH + L.gameH - 10;
+  g.fillStyle   = 'rgba(0,0,0,0.55)';
+  roundRect(cx - 160, textY - 14, 320, 20, 4, true, false);
+  g.fillStyle    = '#94a3b8';
+  g.font         = '12px Arial';
+  g.textAlign    = 'center';
   g.textBaseline = 'middle';
-  g.fillText(scene.desc, cx, L.steerCY - 2);
+  g.fillText(scene.desc, cx, textY);
 
   // Path on-track indicator
   if (scene.path) {
-    const spline = getSpline(scene);
-    const dist = Math.sqrt(nearestSplineDist2(spline, truck.x, truck.y));
+    const spline  = getSpline(scene);
+    const dist    = Math.sqrt(nearestSplineDist2(spline, truck.x, truck.y));
     const onTrack = dist < scene.path.width / 2;
+    const indY    = textY - 22;
+    g.fillStyle   = 'rgba(0,0,0,0.55)';
+    roundRect(cx - 52, indY - 10, 104, 18, 4, true, false);
     g.fillStyle = onTrack ? '#34d399' : '#f87171';
-    g.font = 'bold 11px Arial';
-    g.fillText(onTrack ? '✓ On track' : '✗ Off track', cx, L.steerCY + 16);
+    g.font      = 'bold 11px Arial';
+    g.fillText(onTrack ? '✓ On track' : '✗ Off track', cx, indY);
   }
 }
 
