@@ -275,13 +275,12 @@ function physicsTick(dt) {
   const v = st.drv * SPD;
   if (v === 0) return;
 
-  // Bicycle model (front-wheel drive/steer):
-  // The steerable wheel drives the truck in the direction it points.
-  // cos(phi) projects that onto the truck heading → forward/backward speed.
-  // sin(phi) creates the turn rate.
-  // At phi=0°: full speed ahead. At phi=90°: pivot only. At phi=180°: full speed backward.
+  // Bicycle model (rear-wheel drive/steer):
+  // The steerable wheel is at the back (left of driver, -x end).
+  // The 2 fixed wheels are at the fork end (+x end).
+  // cos(phi) → forward speed; sin(phi) → turn rate (negative: rear-steer reverses heading change).
   const vForward = v * Math.cos(st.phi);
-  const omega    = v * Math.sin(st.phi) / WB;
+  const omega    = -(v * Math.sin(st.phi)) / WB;
 
   truck.x += vForward * Math.cos(truck.a) * dt;
   truck.y += vForward * Math.sin(truck.a) * dt;
@@ -582,8 +581,8 @@ function drawTruck() {
   g.translate(truck.x, truck.y);
   g.rotate(truck.a);
 
-  // ── Fixed wheels (2, at left end = LOCAL −x) ──
-  const wlx = -TL / 2; // wheel local x
+  // ── Fixed wheels (2, at RIGHT end = LOCAL +x, next to forks) ──
+  const wlx = TL / 2; // wheel local x
   for (const wy of [-TW / 3, TW / 3]) {
     g.save();
     g.translate(wlx, wy);
@@ -597,8 +596,8 @@ function drawTruck() {
     g.restore();
   }
 
-  // ── Steerable wheel (right end = LOCAL +x, rotated by phi) ──
-  const wsx = TL / 2;
+  // ── Steerable wheel (left end = LOCAL −x, rotated by phi) ──
+  const wsx = -TL / 2;
   g.save();
   g.translate(wsx, 0);
   g.rotate(st.phi);
@@ -623,13 +622,13 @@ function drawTruck() {
   g.lineWidth   = 2;
   roundRect(-TL / 2, -TW / 2, TL, TW, 5, true, true);
 
-  // Body detail: hood / engine area (right side = steerable)
+  // Body detail: motor/drive area (left side = steerable wheel end)
   g.fillStyle = hitting ? '#fca5a5' : '#fde68a';
-  roundRect(TL / 2 - 20, -TW / 2 + 3, 17, TW - 6, 3, true, false);
+  roundRect(-TL / 2 + 3, -TW / 2 + 3, 17, TW - 6, 3, true, false);
 
-  // Body detail: battery / operator area (left side = fixed)
+  // Body detail: fork/load area (right side = fixed wheels end)
   g.fillStyle = hitting ? '#ef4444' : '#d97706';
-  roundRect(-TL / 2 + 2, -TW / 2 + 3, 22, TW - 6, 3, true, false);
+  roundRect(TL / 2 - 24, -TW / 2 + 3, 22, TW - 6, 3, true, false);
 
   // ── Driver — top-down person-on-chair pictogram, black ──
   drawPersonOnChair(-TL / 10, TW * 0.02, 56, '#000000');
@@ -950,20 +949,20 @@ function drawMiniForklift(cx, cy, s) {
     g.beginPath(); g.moveTo(bw / 2, fy); g.lineTo(bw / 2 + fl, fy); g.stroke();
   }
 
-  // Fixed wheel indicators (left)
+  // Fixed wheel indicators (right, next to forks)
   for (const wy of [-bh * 0.3, bh * 0.3]) {
     g.fillStyle   = 'rgba(60,60,60,0.85)';
     g.strokeStyle = 'rgba(110,110,110,0.6)';
     g.lineWidth   = 0.8;
-    g.beginPath(); g.ellipse(-bw / 2, wy, bh * 0.13, bw * 0.065, 0, 0, Math.PI * 2); g.fill(); g.stroke();
+    g.beginPath(); g.ellipse(bw / 2, wy, bh * 0.13, bw * 0.065, 0, 0, Math.PI * 2); g.fill(); g.stroke();
   }
 
-  // Steerable wheel (right) — yellow to highlight it
+  // Steerable wheel (left end) — yellow to highlight it
   g.fillStyle   = 'rgba(250,204,21,0.95)';
   g.strokeStyle = 'rgba(180,130,0,0.9)';
   g.lineWidth   = 1;
   g.save();
-  g.translate(bw / 2, 0);
+  g.translate(-bw / 2, 0);
   g.rotate(st.phi);
   g.beginPath(); g.ellipse(0, 0, bh * 0.14, bw * 0.065, 0, 0, Math.PI * 2); g.fill(); g.stroke();
   g.restore();
